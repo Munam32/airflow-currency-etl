@@ -5,6 +5,7 @@ transform into a normalized schema, and load into MongoDB.
 Tasks communicate exclusively through named XComs:
   extract_rates   -> pushes "raw_rates" (key="raw_rates")
   transform_rates -> pulls "raw_rates", pushes "transformed_rates"
+  load_to_mongo   -> pulls "transformed_rates"
 """
 
 from __future__ import annotations
@@ -17,6 +18,10 @@ from airflow.sdk import dag, task
 BASE_CURRENCY = "EUR"
 TARGET_CURRENCIES = ["USD", "GBP", "JPY"]
 FRANKFURTER_URL = "https://api.frankfurter.dev/v1/latest"
+
+MONGO_CONN_URI = "mongodb://mongo_user:mongo_password@mongodb:27017/"
+MONGO_DB_NAME = "currency_db"
+MONGO_COLLECTION_NAME = "exchange_rates"
 
 RAW_RATES_XCOM_KEY = "raw_rates"
 TRANSFORMED_RATES_XCOM_KEY = "transformed_rates"
@@ -65,7 +70,24 @@ def currency_exchange_etl():
 
         ti.xcom_push(key=TRANSFORMED_RATES_XCOM_KEY, value=transformed_records)
 
-    extract_rates() >> transform_rates()
+    @task(task_id="load_to_mongo")
+    def load_to_mongo(**context) -> None:
+        """Pull the transformed records and insert them into MongoDB."""
+        from pymongo import MongoClient
+
+        ti = context["ti"]
+        records = ti.xcom_pull(task_ids="transform_rates", key=TRANSFORMED_RATES_XCOM_KEY)
+
+        client = MongoClient(MONGO_CONN_URI)
+        try:
+            collection = client[MONGO_DB_NAME][MONGO_COLLECTION_NAME]
+            result = collection.insert_many(records)
+            print(f"Inserted {len(result.inserted_ids)} documents into "
+                  f"{MONGO_DB_NAME}.{MONGO_COLLECTION_NAME}")
+        finally:
+            client.close()
+
+    extract_rates() >> transform_rates() >> load_to_mongo()
 
 
 currency_exchange_etl()
